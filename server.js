@@ -202,28 +202,44 @@ app.get('/h2h', async (req, res) => {
   const { event_key } = req.query;
   
   if (!event_key) {
-    return res.status(400).json({ error: 'event_key is required' });
+    return res.status(400).json({ 
+      success: 0,
+      error: 'event_key is required',
+      example: '/h2h?event_key=12345' 
+    });
   }
 
   try {
-    const eventRes = await axios.get(
-      `${BASE_URL}?method=get_events&APIkey=${API_KEY}`
-    );
+    // First try to get from your cache/dataStore
+    const cachedData = dataStore.detailedMatches.get(event_key);
+    if (cachedData && cachedData.h2h_data) {
+      return res.json({
+        success: 1,
+        source: 'cache',
+        data: cachedData.h2h_data
+      });
+    }
 
+    // If not in cache, fetch from API
+    const eventRes = await axios.get(`${BASE_URL}?method=get_events&APIkey=${API_KEY}`);
     const event = eventRes.data?.result?.find(ev => ev.event_key == event_key);
 
     if (!event) {
-      return res.status(404).json({ error: 'Event not found for given event_key' });
+      return res.status(404).json({ 
+        success: 0,
+        error: 'Event not found' 
+      });
     }
 
-    const first_team_key = event.home_team_key;
-    const second_team_key = event.away_team_key;
-
     const h2hRes = await axios.get(
-      `${BASE_URL}?method=get_H2H&APIkey=${API_KEY}&first_team_key=${first_team_key}&second_team_key=${second_team_key}`
+      `${BASE_URL}?method=get_H2H&APIkey=${API_KEY}` +
+      `&first_team_key=${event.home_team_key}` +
+      `&second_team_key=${event.away_team_key}`
     );
 
     const responseData = {
+      success: 1,
+      source: 'api',
       event_info: {
         event_name: `${event.event_home_team} vs ${event.event_away_team}`,
         date: event.event_date_start,
@@ -232,10 +248,22 @@ app.get('/h2h', async (req, res) => {
       h2h_data: h2hRes.data
     };
 
+    // Store in cache
+    if (h2hRes.data?.result) {
+      dataStore.detailedMatches.set(event_key, { 
+        ...(cachedData || {}), 
+        h2h_data: h2hRes.data 
+      });
+    }
+
     res.json(responseData);
   } catch (error) {
-    console.error(error.message);
-    res.status(500).json({ error: 'Failed to fetch H2H data via event.' });
+    console.error('H2H Error:', error.response?.data || error.message);
+    res.status(500).json({
+      success: 0,
+      error: 'Failed to fetch H2H data',
+      api_error: error.response?.data || error.message
+    });
   }
 });
 
