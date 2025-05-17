@@ -198,65 +198,29 @@ app.get('/matches/:eventKey', async (req, res) => {
 });
 
 // Head-to-head route (unchanged from your original)
+// Head-to-head route - simplified version
 app.get('/h2h', async (req, res) => {
-  const { event_key } = req.query;
+  const { first_team_key, second_team_key } = req.query;
   
-  if (!event_key) {
+  if (!first_team_key || !second_team_key) {
     return res.status(400).json({ 
       success: 0,
-      error: 'event_key is required',
-      example: '/h2h?event_key=12345' 
+      error: 'Both first_team_key and second_team_key are required',
+      example: '/h2h?first_team_key=147&second_team_key=149' 
     });
   }
 
   try {
-    // First try to get from your cache/dataStore
-    const cachedData = dataStore.detailedMatches.get(event_key);
-    if (cachedData && cachedData.h2h_data) {
-      return res.json({
-        success: 1,
-        source: 'cache',
-        data: cachedData.h2h_data
-      });
-    }
-
-    // If not in cache, fetch from API
-    const eventRes = await axios.get(`${BASE_URL}?method=get_events&APIkey=${API_KEY}`);
-    const event = eventRes.data?.result?.find(ev => ev.event_key == event_key);
-
-    if (!event) {
-      return res.status(404).json({ 
-        success: 0,
-        error: 'Event not found' 
-      });
-    }
-
     const h2hRes = await axios.get(
       `${BASE_URL}?method=get_H2H&APIkey=${API_KEY}` +
-      `&first_team_key=${event.home_team_key}` +
-      `&second_team_key=${event.away_team_key}`
+      `&first_team_key=${first_team_key}` +
+      `&second_team_key=${second_team_key}`
     );
 
-    const responseData = {
+    res.json({
       success: 1,
-      source: 'api',
-      event_info: {
-        event_name: `${event.event_home_team} vs ${event.event_away_team}`,
-        date: event.event_date_start,
-        league: event.league_name,
-      },
-      h2h_data: h2hRes.data
-    };
-
-    // Store in cache
-    if (h2hRes.data?.result) {
-      dataStore.detailedMatches.set(event_key, { 
-        ...(cachedData || {}), 
-        h2h_data: h2hRes.data 
-      });
-    }
-
-    res.json(responseData);
+      data: h2hRes.data
+    });
   } catch (error) {
     console.error('H2H Error:', error.response?.data || error.message);
     res.status(500).json({
