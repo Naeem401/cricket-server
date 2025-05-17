@@ -20,12 +20,14 @@ const BASE_URL = 'https://apiv2.api-cricket.com/cricket/';
 const FETCH_INTERVAL = 30000; // 30 seconds for general updates
 const LIVE_UPDATE_INTERVAL = 2000; // 2 seconds for live matches
 const DETAILED_UPDATE_INTERVAL = 5000; // 5 seconds for detailed match data
+const SCORECARD_UPDATE_INTERVAL = 3000; // 3 seconds for scorecard updates
 
-// Data storage
+// Enhanced data storage with scorecard tracking
 const dataStore = {
   allMatches: [],
   liveMatches: new Map(), // eventKey -> basic match data
   detailedMatches: new Map(), // eventKey -> full match details
+  scorecardData: new Map(), // eventKey -> scorecard data
   lastUpdated: null
 };
 
@@ -33,7 +35,7 @@ const dataStore = {
 app.use(cors());
 app.use(express.json());
 
-// Socket.IO setup
+// Socket.IO setup with enhanced error handling
 io.on('connection', (socket) => {
   console.log(`Client connected: ${socket.id}`);
   
@@ -53,12 +55,21 @@ io.on('connection', (socket) => {
 
   // Detailed match subscriptions
   socket.on('subscribe_match', (eventKey) => {
-    socket.join(`match_${eventKey}`);
-    console.log(`Client subscribed to match ${eventKey}`);
-    
-    // Send current data if available
-    if (dataStore.detailedMatches.has(eventKey)) {
-      socket.emit(`match_${eventKey}_details`, dataStore.detailedMatches.get(eventKey));
+    try {
+      socket.join(`match_${eventKey}`);
+      console.log(`Client subscribed to match ${eventKey}`);
+      
+      // Send current data if available
+      if (dataStore.detailedMatches.has(eventKey)) {
+        socket.emit(`match_${eventKey}_details`, dataStore.detailedMatches.get(eventKey));
+      }
+      
+      // Send scorecard data if available
+      if (dataStore.scorecardData.has(eventKey)) {
+        socket.emit(`match_${eventKey}_scorecard`, dataStore.scorecardData.get(eventKey));
+      }
+    } catch (error) {
+      console.error(`Subscription error for match ${eventKey}:`, error);
     }
   });
 
@@ -72,8 +83,8 @@ io.on('connection', (socket) => {
   });
 });
 
-// Main match data fetcher
-const fetchAllMatches = async () => {
+// Enhanced match data fetcher with retry logic
+const fetchAllMatches = async (retryCount = 0) => {
   try {
     const today = moment();
     const date_start = today.clone().subtract(14, 'days').format('YYYY-MM-DD');
@@ -98,10 +109,14 @@ const fetchAllMatches = async () => {
 
   } catch (error) {
     console.error('Error fetching matches:', error.message);
+    if (retryCount < 3) {
+      console.log(`Retrying... Attempt ${retryCount + 1}`);
+      setTimeout(() => fetchAllMatches(retryCount + 1), 5000);
+    }
   }
 };
 
-// Process live matches
+// Enhanced live match processor
 const updateLiveMatches = (matches) => {
   const liveMatches = matches.filter(match => 
     match.event_status === 'In Progress' || match.event_live === '1'
@@ -115,6 +130,12 @@ const updateLiveMatches = (matches) => {
     if (!existing || JSON.stringify(existing) !== JSON.stringify(match)) {
       dataStore.liveMatches.set(eventKey, match);
       io.to('match_list').emit('match_updated', match);
+      
+      // If this is a new live match, immediately fetch detailed data
+      if (!existing) {
+        fetchDetailedMatchData(eventKey);
+        fetchScorecardData(eventKey);
+      }
     }
   });
 
@@ -123,12 +144,14 @@ const updateLiveMatches = (matches) => {
   dataStore.liveMatches.forEach((_, key) => {
     if (!currentLiveKeys.has(key)) {
       dataStore.liveMatches.delete(key);
+      dataStore.detailedMatches.delete(key);
+      dataStore.scorecardData.delete(key);
     }
   });
 };
 
-// Fetch detailed match data
-const fetchDetailedMatchData = async (eventKey) => {
+// Enhanced detailed match data fetcher
+const fetchDetailedMatchData = async (eventKey, retryCount = 0) => {
   try {
     const url = `${BASE_URL}?method=get_event&APIkey=${API_KEY}&event_key=${eventKey}`;
     const response = await axios.get(url);
@@ -141,12 +164,46 @@ const fetchDetailedMatchData = async (eventKey) => {
     return detailedData;
   } catch (error) {
     console.error(`Error fetching details for match ${eventKey}:`, error.message);
+    if (retryCount < 2) {
+      setTimeout(() => fetchDetailedMatchData(eventKey, retryCount + 1), 3000);
+    }
     return null;
   }
 };
 
-// Background jobs
+// New function to fetch scorecard data
+const fetchScorecardData = async (eventKey, retryCount = 0) => {
+  try {
+    const url = `${BASE_URL}?method=get_event&APIkey=${API_KEY}&event_key=${eventKey}`;
+    const response = await axios.get(url);
+    const matchData = response.data?.result || {};
+    
+    // Extract scorecard data
+    const scorecardData = {
+      scorecard: matchData.scorecard || {},
+      innings: matchData.innings || {},
+      extra: matchData.extra || {},
+      batsmen: matchData.batsmen || [],
+      bowlers: matchData.bowlers || []
+    };
+    
+    // Store and broadcast
+    dataStore.scorecardData.set(eventKey, scorecardData);
+    io.to(`match_${eventKey}`).emit(`match_${eventKey}_scorecard`, scorecardData);
+    
+    return scorecardData;
+  } catch (error) {
+    console.error(`Error fetching scorecard for match ${eventKey}:`, error.message);
+    if (retryCount < 2) {
+      setTimeout(() => fetchScorecardData(eventKey, retryCount + 1), 3000);
+    }
+    return null;
+  }
+};
+
+// Background jobs with staggered timing
 setInterval(fetchAllMatches, FETCH_INTERVAL);
+
 setInterval(() => {
   // Update detailed data for live matches
   dataStore.liveMatches.forEach((_, key) => {
@@ -154,13 +211,21 @@ setInterval(() => {
   });
 }, DETAILED_UPDATE_INTERVAL);
 
-// Routes
+setInterval(() => {
+  // Update scorecard data for live matches
+  dataStore.liveMatches.forEach((_, key) => {
+    fetchScorecardData(key);
+  });
+}, SCORECARD_UPDATE_INTERVAL);
+
+// API Routes with enhanced error handling
 app.get('/', (req, res) => {
   res.json({
     status: 'Cricket API Server',
     endpoints: {
       matches: '/matches',
       match_details: '/matches/:eventKey',
+      match_scorecard: '/matches/:eventKey/scorecard',
       h2h: '/h2h?event_key=',
       standings: '/standings'
     },
@@ -170,10 +235,15 @@ app.get('/', (req, res) => {
 
 // Get all matches
 app.get('/matches', (req, res) => {
-  res.json({
-    data: dataStore.allMatches,
-    lastUpdated: dataStore.lastUpdated
-  });
+  try {
+    res.json({
+      data: dataStore.allMatches,
+      lastUpdated: dataStore.lastUpdated
+    });
+  } catch (error) {
+    console.error('Error in /matches route:', error);
+    res.status(500).json({ error: 'Failed to get matches' });
+  }
 });
 
 // Get detailed match data
@@ -182,7 +252,6 @@ app.get('/matches/:eventKey', async (req, res) => {
     let matchData = dataStore.detailedMatches.get(req.params.eventKey);
     
     if (!matchData) {
-      // If not in cache, fetch fresh data
       matchData = await fetchDetailedMatchData(req.params.eventKey);
     }
     
@@ -197,8 +266,27 @@ app.get('/matches/:eventKey', async (req, res) => {
   }
 });
 
-// Head-to-head route (unchanged from your original)
-// Head-to-head route - simplified version
+// New endpoint for scorecard data
+app.get('/matches/:eventKey/scorecard', async (req, res) => {
+  try {
+    let scorecardData = dataStore.scorecardData.get(req.params.eventKey);
+    
+    if (!scorecardData) {
+      scorecardData = await fetchScorecardData(req.params.eventKey);
+    }
+    
+    if (!scorecardData) {
+      return res.status(404).json({ error: 'Scorecard not available' });
+    }
+    
+    res.json(scorecardData);
+  } catch (error) {
+    console.error('Error getting scorecard:', error);
+    res.status(500).json({ error: 'Failed to get scorecard' });
+  }
+});
+
+// Head-to-head route
 app.get('/h2h', async (req, res) => {
   const { first_team_key, second_team_key } = req.query;
   
@@ -231,7 +319,7 @@ app.get('/h2h', async (req, res) => {
   }
 });
 
-// Standings route (unchanged from your original)
+// Standings route
 app.get('/standings', async (req, res) => {
   const { event_key, league_key } = req.query;
 
@@ -270,18 +358,35 @@ app.get('/standings', async (req, res) => {
   }
 });
 
-// Error handling
+// Error handling middleware
 app.use((err, req, res, next) => {
   console.error('Server error:', err.stack);
-  res.status(500).json({ error: 'Something went wrong on the server!' });
+  res.status(500).json({ 
+    error: 'Something went wrong on the server!',
+    details: process.env.NODE_ENV === 'development' ? err.message : undefined
+  });
 });
 
-// Initial data load
-fetchAllMatches().then(() => {
-  console.log('Initial data loaded');
-});
+// Initial data load with retry
+const initializeServer = async (attempt = 0) => {
+  try {
+    await fetchAllMatches();
+    console.log('Initial data loaded successfully');
+  } catch (error) {
+    console.error('Initial data load failed:', error);
+    if (attempt < 3) {
+      console.log(`Retrying initial load... Attempt ${attempt + 1}`);
+      setTimeout(() => initializeServer(attempt + 1), 5000);
+    } else {
+      console.error('Failed to load initial data after 3 attempts');
+    }
+  }
+};
 
-server.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-  console.log(`WebSocket ready for real-time updates`);
+// Start server
+initializeServer().then(() => {
+  server.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`WebSocket ready for real-time updates`);
+  });
 });
