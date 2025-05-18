@@ -282,9 +282,21 @@ app.get('/matches', (req, res) => {
 });
 
 // Get live matches
+// In your server code, modify the live matches handling:
+
+// Update the live matches endpoint to include more detailed data
 app.get('/live', (req, res) => {
   try {
-    const liveMatches = Array.from(dataStore.liveMatches.values());
+    const liveMatches = Array.from(dataStore.liveMatches.values())
+      .map(match => {
+        const detailed = dataStore.detailedMatches.get(match.event_key) || {};
+        const scorecard = dataStore.scorecardData.get(match.event_key) || {};
+        return {
+          ...match,
+          detailed,
+          scorecard
+        };
+      });
     
     res.json({
       count: liveMatches.length,
@@ -296,6 +308,29 @@ app.get('/live', (req, res) => {
     res.status(500).json({ error: 'Failed to get live matches' });
   }
 });
+
+// Enhance the live matches update interval
+setInterval(() => {
+  // Update live matches with more detailed data
+  dataStore.liveMatches.forEach((match, key) => {
+    fetchDetailedMatchData(key).then(detailedData => {
+      if (detailedData) {
+        // Merge detailed data with basic match data
+        const updatedMatch = {
+          ...match,
+          ...detailedData
+        };
+        dataStore.liveMatches.set(key, updatedMatch);
+        
+        // Broadcast to live subscribers
+        io.to('live_matches').emit('live_matches_update', {
+          matches: Array.from(dataStore.liveMatches.values()),
+          lastUpdated: new Date()
+        });
+      }
+    });
+  });
+}, 3000); // Update every 3 seconds
 
 // Get detailed match data
 app.get('/matches/:eventKey', async (req, res) => {
