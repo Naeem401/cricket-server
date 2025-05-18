@@ -53,6 +53,21 @@ io.on('connection', (socket) => {
     console.log(`Client subscribed to match list updates`);
   });
 
+  // Live matches subscription
+  socket.on('subscribe_live', () => {
+    socket.join('live_matches');
+    console.log(`Client subscribed to live matches updates`);
+    
+    // Send current live matches if available
+    const liveMatches = Array.from(dataStore.liveMatches.values());
+    if (liveMatches.length > 0) {
+      socket.emit('live_matches_update', {
+        matches: liveMatches,
+        lastUpdated: dataStore.lastUpdated
+      });
+    }
+  });
+
   // Detailed match subscriptions
   socket.on('subscribe_match', (eventKey) => {
     try {
@@ -76,6 +91,11 @@ io.on('connection', (socket) => {
   socket.on('unsubscribe_match', (eventKey) => {
     socket.leave(`match_${eventKey}`);
     console.log(`Client unsubscribed from match ${eventKey}`);
+  });
+
+  socket.on('unsubscribe_live', () => {
+    socket.leave('live_matches');
+    console.log(`Client unsubscribed from live matches`);
   });
 
   socket.on('disconnect', () => {
@@ -119,7 +139,9 @@ const fetchAllMatches = async (retryCount = 0) => {
 // Enhanced live match processor
 const updateLiveMatches = (matches) => {
   const liveMatches = matches.filter(match => 
-    match.event_status === 'In Progress' || match.event_live === '1'
+    (match.event_status?.toLowerCase() === 'in progress' || 
+     match.event_status?.toLowerCase() === 'live') && 
+    match.event_live === '1'
   );
 
   // Update existing live matches
@@ -129,7 +151,13 @@ const updateLiveMatches = (matches) => {
     
     if (!existing || JSON.stringify(existing) !== JSON.stringify(match)) {
       dataStore.liveMatches.set(eventKey, match);
+      
+      // Broadcast to both match list and live matches subscribers
       io.to('match_list').emit('match_updated', match);
+      io.to('live_matches').emit('live_matches_update', {
+        matches: Array.from(dataStore.liveMatches.values()),
+        lastUpdated: new Date()
+      });
       
       // If this is a new live match, immediately fetch detailed data
       if (!existing) {
@@ -146,6 +174,12 @@ const updateLiveMatches = (matches) => {
       dataStore.liveMatches.delete(key);
       dataStore.detailedMatches.delete(key);
       dataStore.scorecardData.delete(key);
+      
+      // Notify clients that match is no longer live
+      io.to('live_matches').emit('live_matches_update', {
+        matches: Array.from(dataStore.liveMatches.values()),
+        lastUpdated: new Date()
+      });
     }
   });
 };
@@ -171,7 +205,7 @@ const fetchDetailedMatchData = async (eventKey, retryCount = 0) => {
   }
 };
 
-// New function to fetch scorecard data
+// Function to fetch scorecard data
 const fetchScorecardData = async (eventKey, retryCount = 0) => {
   try {
     const url = `${BASE_URL}?method=get_event&APIkey=${API_KEY}&event_key=${eventKey}`;
@@ -218,12 +252,13 @@ setInterval(() => {
   });
 }, SCORECARD_UPDATE_INTERVAL);
 
-// API Routes with enhanced error handling
+// API Routes
 app.get('/', (req, res) => {
   res.json({
     status: 'Cricket API Server',
     endpoints: {
       matches: '/matches',
+      live_matches: '/live',
       match_details: '/matches/:eventKey',
       match_scorecard: '/matches/:eventKey/scorecard',
       h2h: '/h2h?event_key=',
@@ -243,6 +278,22 @@ app.get('/matches', (req, res) => {
   } catch (error) {
     console.error('Error in /matches route:', error);
     res.status(500).json({ error: 'Failed to get matches' });
+  }
+});
+
+// Get live matches
+app.get('/live', (req, res) => {
+  try {
+    const liveMatches = Array.from(dataStore.liveMatches.values());
+    
+    res.json({
+      count: liveMatches.length,
+      matches: liveMatches,
+      lastUpdated: dataStore.lastUpdated
+    });
+  } catch (error) {
+    console.error('Error in /live route:', error);
+    res.status(500).json({ error: 'Failed to get live matches' });
   }
 });
 
@@ -266,7 +317,7 @@ app.get('/matches/:eventKey', async (req, res) => {
   }
 });
 
-// New endpoint for scorecard data
+// Get scorecard data
 app.get('/matches/:eventKey/scorecard', async (req, res) => {
   try {
     let scorecardData = dataStore.scorecardData.get(req.params.eventKey);
