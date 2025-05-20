@@ -14,6 +14,8 @@ const io = socketIo(server, {
   }
 });
 
+//AIzaSyCq6CK-guMmXLJcVAH_pR4wtdkw_48dfuY
+
 const PORT = 3000;
 const API_KEY = 'eaeb6c6d25b8352b28320e08174ea3b48f4d5e6e7f912bdb72445f733fd83e2b';
 const BASE_URL = 'https://apiv2.api-cricket.com/cricket/';
@@ -306,6 +308,42 @@ app.get('/live', (req, res) => {
   } catch (error) {
     console.error('Error in /live route:', error);
     res.status(500).json({ error: 'Failed to get live matches' });
+  }
+});
+
+app.get('/highlights', async (req, res) => {
+  try {
+    const today = new Date();
+    const allHighlights = [];
+
+    for (let i = 0; i < 7; i++) {
+      const date = new Date(today);
+      date.setDate(today.getDate() - i); // Go back i days
+      const dateStr = date.toISOString().split('T')[0];
+
+      const response = await axios.get('https://cricket-highlights-api.p.rapidapi.com/highlights', {
+        params: {
+          date: dateStr,
+          limit: 40,
+          offset: 0,
+          timezone: 'Etc/UTC'
+        },
+        headers: {
+          'x-rapidapi-host': 'cricket-highlights-api.p.rapidapi.com',
+          'x-rapidapi-key': '9039004ce3msh8ae4f9c049e7c1fp13969fjsn90e3ab56524a'
+        }
+      });
+
+      const data = response.data?.data || [];
+      if (data.length > 0) {
+        allHighlights.push(...data);
+      }
+    }
+
+    res.status(200).json({ count: allHighlights.length, highlights: allHighlights });
+  } catch (error) {
+    console.error('Error fetching highlights:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Failed to fetch highlights' });
   }
 });
 
