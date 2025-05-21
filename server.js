@@ -14,8 +14,6 @@ const io = socketIo(server, {
   }
 });
 
-//AIzaSyCq6CK-guMmXLJcVAH_pR4wtdkw_48dfuY
-
 const PORT = 3000;
 const API_KEY = 'eaeb6c6d25b8352b28320e08174ea3b48f4d5e6e7f912bdb72445f733fd83e2b';
 const BASE_URL = 'https://apiv2.api-cricket.com/cricket/';
@@ -264,7 +262,8 @@ app.get('/', (req, res) => {
       match_details: '/matches/:eventKey',
       match_scorecard: '/matches/:eventKey/scorecard',
       h2h: '/h2h?event_key=',
-      standings: '/standings'
+      standings: '/standings',
+      highlights: '/highlights'
     },
     last_updated: dataStore.lastUpdated
   });
@@ -284,9 +283,6 @@ app.get('/matches', (req, res) => {
 });
 
 // Get live matches
-// In your server code, modify the live matches handling:
-
-// Update the live matches endpoint to include more detailed data
 app.get('/live', (req, res) => {
   try {
     const liveMatches = Array.from(dataStore.liveMatches.values())
@@ -311,26 +307,42 @@ app.get('/live', (req, res) => {
   }
 });
 
+// Enhanced highlights endpoint with 7-day default and optional filters
 app.get('/highlights', async (req, res) => {
   try {
-    // 1. Try multiple date ranges as fallback
-    const dateRanges = [
-      new Date().toISOString().split('T')[0], // Today
-      new Date(Date.now() - 86400000).toISOString().split('T')[0], // Yesterday
-      new Date(Date.now() - 259200000).toISOString().split('T')[0] // 3 days ago
-    ];
+    // Set default parameters
+    const limit = req.query.limit || 40;
+    const offset = req.query.offset || 0;
+    const timezone = req.query.timezone || 'Etc/UTC';
+    
+    // Prepare optional filters
+    const optionalParams = {};
+    if (req.query.countryName) optionalParams.countryName = req.query.countryName;
+    if (req.query.leagueName) optionalParams.leagueName = req.query.leagueName;
+    if (req.query.countryCode) optionalParams.countryCode = req.query.countryCode;
+    if (req.query.leagueId) optionalParams.leagueId = req.query.leagueId;
+    if (req.query.homeTeamName) optionalParams.homeTeamName = req.query.homeTeamName;
+    if (req.query.awayTeamName) optionalParams.awayTeamName = req.query.awayTeamName;
 
-    // 2. Try each date until we get results
+    // Generate date ranges for last 7 days
+    const dateRanges = [];
+    for (let i = 0; i < 7; i++) {
+      const date = new Date();
+      date.setDate(date.getDate() - i);
+      dateRanges.push(date.toISOString().split('T')[0]);
+    }
+
+    // Try each date until we get results
     let highlights = [];
     for (const date of dateRanges) {
       try {
         const response = await axios.get('https://cricket-highlights-api.p.rapidapi.com/highlights', {
           params: {
             date,
-            limit: 40,
-            offset: 0,
-            timezone: 'Etc/UTC',
-            ...req.query // Pass through any client filters
+            limit,
+            offset,
+            timezone,
+            ...optionalParams
           },
           headers: {
             'x-rapidapi-host': 'cricket-highlights-api.p.rapidapi.com',
@@ -340,21 +352,20 @@ app.get('/highlights', async (req, res) => {
         });
 
         if (response.data?.data?.length > 0) {
-          highlights = response.data.data;
-          break; // Stop when we find results
+          highlights = highlights.concat(response.data.data);
         }
       } catch (error) {
         console.error(`Error for date ${date}:`, error.message);
       }
     }
 
-    // 3. Handle empty results
+    // Handle empty results
     if (highlights.length === 0) {
       return res.status(404).json({
         success: false,
-        message: 'No highlights available',
+        message: 'No highlights available for the last 7 days',
         suggestions: [
-          'Try different date ranges',
+          'Try different filters (country, league, team)',
           'Check if matches were played recently',
           'Verify your API key is active'
         ],
@@ -365,16 +376,23 @@ app.get('/highlights', async (req, res) => {
       });
     }
 
-    // 4. Return successful response
+    // Return successful response
     res.json({
       success: true,
       count: highlights.length,
       highlights,
-      lastUpdated: new Date().toISOString()
+      lastUpdated: new Date().toISOString(),
+      parametersUsed: {
+        dateRange: `${dateRanges[dateRanges.length - 1]} to ${dateRanges[0]}`,
+        limit,
+        offset,
+        timezone,
+        ...optionalParams
+      }
     });
 
   } catch (error) {
-    console.error('API Error:', {
+    console.error('Highlights API Error:', {
       message: error.message,
       response: error.response?.data
     });
@@ -521,6 +539,131 @@ app.get('/standings', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch standings.' });
   }
 });
+
+//************************************************************************* */
+app.get('/matc', async (req, res) => {
+  try {
+    // Parameters
+    const limit = parseInt(req.query.limit) || 20;
+    const offset = parseInt(req.query.offset) || 0;
+    const timezone = req.query.timezone || 'Etc/UTC';
+    
+    // Optional filters
+    const filters = {};
+    const filterableFields = [
+      'countryName', 'leagueName', 'countryCode', 
+      'leagueId', 'homeTeamName', 'awayTeamName'
+    ];
+    
+    filterableFields.forEach(field => {
+      if (req.query[field]) filters[field] = req.query[field];
+    });
+
+    // Generate 7-day range (3 past + today + 3 future)
+    const today = moment().utc().startOf('day');
+    const dateRanges = [
+      today.clone().subtract(3, 'days'),
+      today.clone().subtract(2, 'days'),
+      today.clone().subtract(1, 'days'),
+      today.clone(),
+      today.clone().add(1, 'days'),
+      today.clone().add(2, 'days'),
+      today.clone().add(3, 'days')
+    ].map(date => date.format('YYYY-MM-DD'));
+
+    console.log('Fetching matches for dates:', dateRanges);
+
+    // 1. First get basic match data from your original API
+    const basicMatchesResponse = await axios.get(`${BASE_URL}?method=get_events`, {
+      params: {
+        APIkey: API_KEY,
+        date_start: dateRanges[0],
+        date_stop: dateRanges[6],
+        timezone: timezone,
+        ...filters
+      },
+      timeout: 5000
+    });
+
+    const basicMatches = basicMatchesResponse.data?.result || [];
+    
+    // 2. Then enrich with RapidAPI data for each match
+    const enrichedMatches = await Promise.all(
+      basicMatches.map(async match => {
+        try {
+          // Get additional details from RapidAPI
+          const rapidApiResponse = await axios.get('https://cricket-matches-api.p.rapidapi.com/matches', {
+            params: {
+              matchId: match.event_key, // Assuming event_key is the ID
+              timezone: timezone
+            },
+            headers: {
+              'x-rapidapi-host': 'cricket-matches-api.p.rapidapi.com',
+              'x-rapidapi-key': '23ed8f1637msh9d5ecb868166523p1db1adjsnab581199d3d5'
+            },
+            timeout: 3000
+          });
+
+          return {
+            ...match,
+            rapidApiData: rapidApiResponse.data || null
+          };
+        } catch (rapidApiError) {
+          console.error(`Failed to enrich match ${match.event_key}:`, rapidApiError.message);
+          return {
+            ...match,
+            rapidApiData: null,
+            rapidApiError: rapidApiError.message
+          };
+        }
+      })
+    );
+
+    // Paginate results
+    const paginatedMatches = enrichedMatches.slice(offset, offset + limit);
+
+    // Response format
+    res.json({
+      success: true,
+      count: paginatedMatches.length,
+      matches: paginatedMatches,
+      total: enrichedMatches.length,
+      lastUpdated: new Date().toISOString(),
+      parametersUsed: {
+        dateRange: `${dateRanges[0]} to ${dateRanges[6]}`,
+        days: 7,
+        limit,
+        offset,
+        timezone,
+        ...(Object.keys(filters).length > 0 && { filters })
+      },
+      dataSources: {
+        primary: 'api-cricket.com',
+        secondary: 'cricket-matches-api.rapidapi.com'
+      }
+    });
+
+  } catch (error) {
+    console.error('Error in /matc endpoint:', {
+      message: error.message,
+      stack: error.stack,
+      response: error.response?.data
+    });
+    
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch match data',
+      ...(process.env.NODE_ENV === 'development' && {
+        debug: {
+          message: error.message,
+          stack: error.stack
+        }
+      })
+    });
+  }
+});
+
+//************************************************************************* */
 
 // Error handling middleware
 app.use((err, req, res, next) => {
