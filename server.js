@@ -313,37 +313,77 @@ app.get('/live', (req, res) => {
 
 app.get('/highlights', async (req, res) => {
   try {
-    const today = new Date();
-    const allHighlights = [];
+    // 1. Try multiple date ranges as fallback
+    const dateRanges = [
+      new Date().toISOString().split('T')[0], // Today
+      new Date(Date.now() - 86400000).toISOString().split('T')[0], // Yesterday
+      new Date(Date.now() - 259200000).toISOString().split('T')[0] // 3 days ago
+    ];
 
-    for (let i = 0; i < 7; i++) {
-      const date = new Date(today);
-      date.setDate(today.getDate() - i); // Go back i days
-      const dateStr = date.toISOString().split('T')[0];
+    // 2. Try each date until we get results
+    let highlights = [];
+    for (const date of dateRanges) {
+      try {
+        const response = await axios.get('https://cricket-highlights-api.p.rapidapi.com/highlights', {
+          params: {
+            date,
+            limit: 40,
+            offset: 0,
+            timezone: 'Etc/UTC',
+            ...req.query // Pass through any client filters
+          },
+          headers: {
+            'x-rapidapi-host': 'cricket-highlights-api.p.rapidapi.com',
+            'x-rapidapi-key': '23ed8f1637msh9d5ecb868166523p1db1adjsnab581199d3d5'
+          },
+          timeout: 5000
+        });
 
-      const response = await axios.get('https://cricket-highlights-api.p.rapidapi.com/highlights', {
-        params: {
-          date: dateStr,
-          limit: 40,
-          offset: 0,
-          timezone: 'Etc/UTC'
-        },
-        headers: {
-          'x-rapidapi-host': 'cricket-highlights-api.p.rapidapi.com',
-          'x-rapidapi-key': '9039004ce3msh8ae4f9c049e7c1fp13969fjsn90e3ab56524a'
+        if (response.data?.data?.length > 0) {
+          highlights = response.data.data;
+          break; // Stop when we find results
         }
-      });
-
-      const data = response.data?.data || [];
-      if (data.length > 0) {
-        allHighlights.push(...data);
+      } catch (error) {
+        console.error(`Error for date ${date}:`, error.message);
       }
     }
 
-    res.status(200).json({ count: allHighlights.length, highlights: allHighlights });
+    // 3. Handle empty results
+    if (highlights.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'No highlights available',
+        suggestions: [
+          'Try different date ranges',
+          'Check if matches were played recently',
+          'Verify your API key is active'
+        ],
+        planStatus: {
+          tier: 'BASIC',
+          remainingRequests: 'Check RapidAPI dashboard'
+        }
+      });
+    }
+
+    // 4. Return successful response
+    res.json({
+      success: true,
+      count: highlights.length,
+      highlights,
+      lastUpdated: new Date().toISOString()
+    });
+
   } catch (error) {
-    console.error('Error fetching highlights:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Failed to fetch highlights' });
+    console.error('API Error:', {
+      message: error.message,
+      response: error.response?.data
+    });
+    
+    res.status(500).json({
+      error: 'Highlights service unavailable',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined,
+      support: 'contact@yourdomain.com'
+    });
   }
 });
 
